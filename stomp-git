@@ -1,0 +1,294 @@
+#!/usr/bin/env ruby
+
+require 'rubygems'
+require 'yaml'
+require 'systemu'
+require 'stomp'
+require 'logger'
+require 'optparse'
+require 'socket'
+require 'etc'
+
+
+options = {}
+version = "3.13"
+crlf = /(\r\n|\n\r|\r|\n)/
+pidfile = '/var/run/stomp-git.pid'
+
+# stdout and stderr require an io handle to write to... this makes Logger one :)
+class Logwrite
+  def initialize(logger, type)
+    @log = logger
+    @type = type
+  end
+
+  def write(message)
+    if @type == "stderr"
+      @log.error(message)
+    elsif @type == "stdout"
+      @log.info(message)
+    end
+    return message.to_s.bytesize
+  end
+
+  # Dummy method to keep what passes for the standard i/o library happy.
+  def flush
+    #
+  end
+
+  alias puts write
+  alias print write
+  alias p write
+end
+
+def logmessage(message,sclient,topic,debug)
+  $log.info(message)
+  host_name = Socket::gethostname
+  smessage = host_name + " " + message
+  begin
+    sclient.publish("/topic/#{topic}",smessage, {:subject => "Talking to eventbot"})
+  rescue Exception => e
+    emessage = "Exception: #{e}"
+    $log.error(emessage)
+    puts emessage if debug
+  end
+  puts message if debug
+end
+
+def do_gitcommand(command,mode,workdir,sclient,topic,debug)
+  crlf = /(\r\n|\n\r|\r|\n)/
+  puts "Command is #{command}" if debug
+
+  status,stdout,stderr = systemu(command, :cwd => workdir, :chomp => true)
+
+  if status != 0
+    status_message = " problem: " + stderr
+  else
+    status_message = " checkout: "
+  end
+
+  eventdetail = status_message + " (#{mode})"
+  eventdetail << "#{stdout}" if debug
+  eventdetail.gsub!(crlf, " ")
+
+  logmessage(eventdetail,sclient,topic,debug)
+end
+
+def dumpmessage(message)
+  puts "Subject: #{message.headers["subject"]}"
+  puts "Message-ID: #{message.headers["message-id"]}"
+  puts "--"
+  puts message.body
+  puts "--"
+end
+
+optparse = OptionParser.new do|opts|
+  opts.banner = "Usage: stomp-git.rb [options]"
+
+  options[:debug] = false
+  opts.on( '-d', '--debug', 'Much output, do not detach' ) do
+    options[:debug] = true
+  end
+
+  options[:configfile] = "/etc/stomp-git/stomp-git.yaml"
+  opts.on( '-c', '--config FILE', 'Config is FILE' ) do|file|
+    options[:configfile] = file
+  end
+
+  opts.on( '-h', '--help', 'Display this screen' ) do
+    puts opts
+        exit
+  end
+end
+
+optparse.parse!
+
+$log = Logger.new("/var/log/stomp-git.log")
+$log.level = Logger::INFO
+
+if !options[:debug]
+  $stderr = Logwrite.new($log, "stderr")
+  $stdout = Logwrite.new($log, "stdout")
+  pid = Process.fork
+else
+  pid = nil
+  puts "DEBUG"
+  puts "VERSION #{version}"
+  puts "CONFIGFILE: #{options[:configfile]}"
+end
+
+if pid.nil?
+  Signal.trap("TERM") do
+    $log.info("Terminating.")
+      exit
+    end
+
+  Signal.trap("HUP") do
+    yconfig = YAML.load_file(options[:configfile])
+    $log.info("Re-read #{options[:configfile]}")
+  end
+
+  yconfig = YAML.load_file(options[:configfile])
+  sdebug = options[:debug]
+
+  puts YAML.dump(yconfig) if sdebug
+
+  stompconnector = yconfig['stompconnector']
+  listen_topic = yconfig["listen-topic"]
+  report_topic = yconfig["report-topic"]
+  repos = yconfig["repo-list"]
+
+  client = Stomp::Client.new(stompconnector)
+
+  if client
+    logmessage("V. #{version} connected to #{listen_topic}",client,report_topic,sdebug)
+
+    client.subscribe "/topic/#{listen_topic}" do |message|
+      if message.body == "\n"
+        puts "Bodge-beat frame" if sdebug
+      else
+        dumpmessage(message) if sdebug
+        message.body.lines do |mline|
+        mkey,mval = mline.split(":",2)
+          if mkey == "repo"
+            repo = repos["#{mval.strip}"]
+
+            if repo.nil?
+              puts "Not our repo: #{mval}" if sdebug
+              break
+            end
+
+            rdir = repo["repo"]
+            if File.exists?(rdir)
+              guser = repo["user"]
+              rmode = repo["mode"]
+              begin
+                guserinfo = Etc.getpwnam(guser)
+              rescue ArgumentError
+                eventdetail = " problem: No such user #{guser}"
+                logmessage(eventdetail,client,report_topic,sdebug)
+                next
+              end
+
+              next if File.readlines('/etc/shells').grep(/#{guserinfo.shell}/).size == 0
+
+              commandline = "/bin/su - #{guser} -c \"cd #{rdir} && /usr/bin/git fetch && /usr/bin/git fetch --tags\""
+              puts "Command is #{commandline}" if sdebug
+
+              status,stdout,stderr = systemu(commandline, :cwd => rdir, :chomp => true)
+
+              if status != 0
+                status_message = " problem: " + stderr
+              else
+                status_message = " fetched change: #{message.headers["subject"]}"
+              end
+
+              eventdetail = status_message
+              eventdetail.gsub!(crlf, " ")
+
+              logmessage(eventdetail,client,report_topic,sdebug)
+
+              if rmode == "puppetmaster"
+                s1,s2,s3 = message.headers["subject"].split(' ',3)
+                if s2 =~ /refs\/heads\//
+                  branch = s2.sub('refs/heads/','')
+                  pdir = repo["target"]
+                  wdir = pdir + "/" + branch
+
+                  if s3 =~ /0000000000000000000000000000000000000000/
+                    # forcefully remove the branch
+                    commandline = "/bin/su - #{guser} -c \"/bin/rm -fr #{wdir}\""
+                    puts "Running command #{commandline}" if sdebug
+                    status,stdout,stderr = systemu(commandline, :chomp => true)
+                    if status != 0
+                      status_message = " problem removing branch: " + stderr
+                    else
+                      status_message = " removed branch #{wdir} "
+                    end
+                    # emit some information to eventbot
+                    eventdetail = status_message
+                    eventdetail.gsub!(crlf, " ")
+                    logmessage(eventdetail,client,report_topic,sdebug)
+                  else
+                    if !File.exists?(wdir)
+                      Dir.mkdir(wdir)
+                      File.chown(guserinfo.uid,guserinfo.gid,wdir)
+                    end
+                    commandline = "/bin/su - #{guser} -c \"cd #{rdir} && /usr/bin/git --work-tree=#{wdir} checkout -f origin/#{branch}\""
+                    do_gitcommand(commandline,rmode,rdir,client,report_topic,sdebug)
+                  end
+                end
+              end
+
+              if rmode == "atomic"
+                s1,s2,s3 = message.headers["subject"].split(' ',3)
+                if s2 =~ /refs\/heads\//
+                  branch = s2.sub('refs/heads/','')
+                    pdir = repo["target"].to_s + "_" + branch
+                    puts "Target is #{pdir}" if sdebug
+                    if !File.exists?(pdir)
+                      Dir.mkdir(pdir)
+                      File.chown(guserinfo.uid,guserinfo.gid,pdir)
+                    end
+
+                    puts "checking out " + repo["target"].to_s + "#{branch}" if sdebug
+                    commandline = "/bin/su - #{guser} -c \"cd #{rdir} && /usr/bin/git --work-tree=#{pdir} checkout -f origin/#{branch}\""
+                    do_gitcommand(commandline,rmode,rdir,client,report_topic,sdebug)
+
+                end
+              end
+
+              if rmode == "branch"
+                s1,s2,s3 = message.headers["subject"].split(' ',3)
+                if s2 =~ /refs\/heads\//
+                  branch = s2.sub('refs/heads/','')
+                  if branch == repo["branch"]
+                    pdir = repo["target"]
+
+                    if !File.exists?(pdir)
+                      Dir.mkdir(pdir)
+                      File.chown(guserinfo.uid,guserinfo.gid,pdir)
+                    end
+
+                    commandline = "/bin/su - #{guser} -c \"cd #{rdir} && /usr/bin/git --work-tree=#{pdir} checkout -f origin/#{branch}\""
+                    do_gitcommand(commandline,rmode,rdir,client,report_topic,sdebug)
+                  else
+                    puts "Not our branch: #{branch}" if sdebug
+                  end
+                end
+              end
+
+              if rmode == "dangerous"
+                commandline = "/bin/su - #{guser} -c \"cd #{rdir} && /usr/bin/git checkout origin/master\""
+                do_gitcommand(commandline,rmode,rdir,client,report_topic,sdebug)
+              end
+
+              if rmode == "trusting"
+                wdir = repo["target"]
+
+                commandline = "/bin/su - #{guser} -c \"cd #{rdir} && /usr/bin/git --work-tree=#{wdir} checkout -f origin/master\""
+                do_gitcommand(commandline,rmode,rdir,client,report_topic,sdebug)
+              end
+            else
+              eventdetail = "Repo in config but not in filesystem: #{mval}"
+              logmessage(eventdetail,client,report_topic,sdebug)
+            end
+          end
+        end
+      end
+    end
+
+    client.join
+    client.close
+  end
+
+else
+  begin
+    File.open(pidfile, 'w') {|f| f.write(pid) }
+  rescue Errno::EACCES
+    $log.error("Cannot create PID file. Check the permissions and try again.")
+    pid = nil
+    exit
+  end
+  Process.detach(pid)
+end
