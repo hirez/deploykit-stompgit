@@ -7,13 +7,17 @@ require 'stomp'
 require 'logger'
 require 'optparse'
 require 'socket'
+require 'fileutils'
 require 'etc'
 
 
 options = {}
-version = "3.13"
-crlf = /(\r\n|\n\r|\r|\n)/
+version = "3.14"
 pidfile = '/var/run/stomp-git.pid'
+
+class UserLoginException<Exception;end;
+class MissingRepoException<Exception;end;
+class NotOurRepoException<Exception;end;
 
 # stdout and stderr require an io handle to write to... this makes Logger one :)
 class Logwrite
@@ -41,8 +45,105 @@ class Logwrite
   alias p write
 end
 
+class Parsemessage
+  attr_reader :repo
+  attr_reader :subj
+  attr_reader :branch
+  attr_reader :commit_id
+
+  def initialize(stompmsg)
+    @branch = ''
+    @commit_id = ''
+    @repo = ''
+
+    @subj = stompmsg.headers["subject"]
+
+    s1,s2,s3 = stompmsg.headers["subject"].split(' ',3)
+    if s2 =~ /refs\/heads\//
+      @branch = s2.sub('refs/heads/','')
+      @commit_id = s3
+    end
+
+    stompmsg.body.lines do |mline|
+      mkey,mval = mline.split(":",2)
+      @repo = mval.strip if mkey == "repo"
+    end
+  end
+end
+
+def check_valid_user(user)
+  guserinfo = Etc.getpwnam(user)
+  if File.readlines('/etc/shells').grep(/#{guserinfo.shell}/).size == 0
+    raise UserLoginException, "#{user} has no login shell."
+  end
+end
+
+def check_valid_repo(msg_repo,conf_repos)
+  raise NotOurRepoException, "Not our repo: #{msg_repo}" if !conf_repos[msg_repo]
+  raise MissingRepoException, "Repo #{msg_repo} in config but not in filesystem." if !File.exists?(conf_repos[msg_repo]['repo'])
+end
+
+def gitfetch(mess,rdir,user)
+  commandline = "/bin/su - #{user} -c \"cd #{rdir} && /usr/bin/git fetch && /usr/bin/git fetch --tags\""
+  status,stdout,stderr = systemu(commandline, :cwd => rdir, :chomp => true)
+  if status != 0
+    status_message = "problem: " + stderr
+  else
+    status_message = "fetched change: #{mess.subj}"
+  end
+  return status_message
+end
+
+def git_branch(rdir,user,target,branch)
+  if !File.exists?(target)
+    guserinfo = Etc.getpwnam(user)
+    FileUtils.mkdir_p(target)
+    File.chown(guserinfo.uid,guserinfo.gid,target)
+  end
+  commandline = "/bin/su - #{user} -c \"cd #{rdir} && /usr/bin/git --work-tree=#{target} checkout -f origin/#{branch}\""
+  status,stdout,stderr = systemu(commandline, :cwd => rdir, :chomp => true)
+  if status != 0
+    status_message = "problem: " + stderr
+  else
+    status_message = "checked out #{branch} to #{target}."
+  end
+  return status_message
+end
+
+def git_puppetmaster(rdir,user,branch,target,separator)
+  pdir = target.to_s + separator + branch
+
+  if branch =~ /0000000000000000000000000000000000000000/
+    # forcefully remove the branch
+    commandline = "/bin/su - #{user} -c \"/bin/rm -fr #{pdir}\""
+    status,stdout,stderr = systemu(commandline, :chomp => true)
+    if status != 0
+      status_message = "problem removing branch: " + stderr
+    else
+      status_message = "removed branch #{pdir} "
+    end
+  else
+    if !File.exists?(pdir)
+      guserinfo = Etc.getpwnam(user)
+      FileUtils.mkdir_p(pdir)
+      File.chown(guserinfo.uid,guserinfo.gid,pdir)
+    end
+    commandline = "/bin/su - #{user} -c \"cd #{rdir} && /usr/bin/git --work-tree=#{pdir} checkout -f origin/#{branch}\""
+    status,stdout,stderr = systemu(commandline, :cwd => rdir, :chomp => true)
+    if status != 0
+      status_message = "problem: " + stderr
+    else
+      status_message = "checked out #{branch} to #{target} as #{pdir}."
+    end
+  end
+
+  return status_message
+end
+
 def logmessage(message,sclient,topic,debug)
+
   $log.info(message)
+
   host_name = Socket::gethostname
   smessage = host_name + " " + message
   begin
@@ -53,25 +154,6 @@ def logmessage(message,sclient,topic,debug)
     puts emessage if debug
   end
   puts message if debug
-end
-
-def do_gitcommand(command,mode,workdir,sclient,topic,debug)
-  crlf = /(\r\n|\n\r|\r|\n)/
-  puts "Command is #{command}" if debug
-
-  status,stdout,stderr = systemu(command, :cwd => workdir, :chomp => true)
-
-  if status != 0
-    status_message = " problem: " + stderr
-  else
-    status_message = " checkout: "
-  end
-
-  eventdetail = status_message + " (#{mode})"
-  eventdetail << "#{stdout}" if debug
-  eventdetail.gsub!(crlf, " ")
-
-  logmessage(eventdetail,sclient,topic,debug)
 end
 
 def dumpmessage(message)
@@ -136,6 +218,7 @@ if pid.nil?
   stompconnector = yconfig['stompconnector']
   listen_topic = yconfig["listen-topic"]
   report_topic = yconfig["report-topic"]
+
   repos = yconfig["repo-list"]
 
   client = Stomp::Client.new(stompconnector)
@@ -148,138 +231,58 @@ if pid.nil?
         puts "Bodge-beat frame" if sdebug
       else
         dumpmessage(message) if sdebug
-        message.body.lines do |mline|
-        mkey,mval = mline.split(":",2)
-          if mkey == "repo"
-            repo = repos["#{mval.strip}"]
 
-            if repo.nil?
-              puts "Not our repo: #{mval}" if sdebug
-              break
-            end
+        msg = Parsemessage.new(message)
+        
+        begin
+          check_valid_repo(msg.repo,repos)
+    
+          repo_dir  = repos[msg.repo]['repo']
+          repo_user = repos[msg.repo]['user']
+          repo_mode = repos[msg.repo]['mode']
 
-            rdir = repo["repo"]
-            if File.exists?(rdir)
-              guser = repo["user"]
-              rmode = repo["mode"]
-              begin
-                guserinfo = Etc.getpwnam(guser)
-              rescue ArgumentError
-                eventdetail = " problem: No such user #{guser}"
-                logmessage(eventdetail,client,report_topic,sdebug)
-                next
-              end
+          check_valid_user(repo_user)
 
-              next if File.readlines('/etc/shells').grep(/#{guserinfo.shell}/).size == 0
+          status = gitfetch(msg,repo_dir,repo_user)
+          logmessage(status,client,report_topic,sdebug)
 
-              commandline = "/bin/su - #{guser} -c \"cd #{rdir} && /usr/bin/git fetch && /usr/bin/git fetch --tags\""
-              puts "Command is #{commandline}" if sdebug
-
-              status,stdout,stderr = systemu(commandline, :cwd => rdir, :chomp => true)
-
-              if status != 0
-                status_message = " problem: " + stderr
-              else
-                status_message = " fetched change: #{message.headers["subject"]}"
-              end
-
-              eventdetail = status_message
-              eventdetail.gsub!(crlf, " ")
-
-              logmessage(eventdetail,client,report_topic,sdebug)
-
-              if rmode == "puppetmaster"
-                s1,s2,s3 = message.headers["subject"].split(' ',3)
-                if s2 =~ /refs\/heads\//
-                  branch = s2.sub('refs/heads/','')
-                  pdir = repo["target"]
-                  wdir = pdir + "/" + branch
-
-                  if s3 =~ /0000000000000000000000000000000000000000/
-                    # forcefully remove the branch
-                    commandline = "/bin/su - #{guser} -c \"/bin/rm -fr #{wdir}\""
-                    puts "Running command #{commandline}" if sdebug
-                    status,stdout,stderr = systemu(commandline, :chomp => true)
-                    if status != 0
-                      status_message = " problem removing branch: " + stderr
-                    else
-                      status_message = " removed branch #{wdir} "
-                    end
-                    # emit some information to eventbot
-                    eventdetail = status_message
-                    eventdetail.gsub!(crlf, " ")
-                    logmessage(eventdetail,client,report_topic,sdebug)
-                  else
-                    if !File.exists?(wdir)
-                      Dir.mkdir(wdir)
-                      File.chown(guserinfo.uid,guserinfo.gid,wdir)
-                    end
-                    commandline = "/bin/su - #{guser} -c \"cd #{rdir} && /usr/bin/git --work-tree=#{wdir} checkout -f origin/#{branch}\""
-                    do_gitcommand(commandline,rmode,rdir,client,report_topic,sdebug)
-                  end
-                end
-              end
-
-              if rmode == "atomic"
-                s1,s2,s3 = message.headers["subject"].split(' ',3)
-                if s2 =~ /refs\/heads\//
-                  branch = s2.sub('refs/heads/','')
-                    pdir = repo["target"].to_s + "_" + branch
-                    puts "Target is #{pdir}" if sdebug
-                    if !File.exists?(pdir)
-                      Dir.mkdir(pdir)
-                      File.chown(guserinfo.uid,guserinfo.gid,pdir)
-                    end
-
-                    puts "checking out " + repo["target"].to_s + "#{branch}" if sdebug
-                    commandline = "/bin/su - #{guser} -c \"cd #{rdir} && /usr/bin/git --work-tree=#{pdir} checkout -f origin/#{branch}\""
-                    do_gitcommand(commandline,rmode,rdir,client,report_topic,sdebug)
-
-                end
-              end
-
-              if rmode == "branch"
-                s1,s2,s3 = message.headers["subject"].split(' ',3)
-                if s2 =~ /refs\/heads\//
-                  branch = s2.sub('refs/heads/','')
-                  if branch == repo["branch"]
-                    pdir = repo["target"]
-
-                    if !File.exists?(pdir)
-                      Dir.mkdir(pdir)
-                      File.chown(guserinfo.uid,guserinfo.gid,pdir)
-                    end
-
-                    commandline = "/bin/su - #{guser} -c \"cd #{rdir} && /usr/bin/git --work-tree=#{pdir} checkout -f origin/#{branch}\""
-                    do_gitcommand(commandline,rmode,rdir,client,report_topic,sdebug)
-                  else
-                    puts "Not our branch: #{branch}" if sdebug
-                  end
-                end
-              end
-
-              if rmode == "dangerous"
-                commandline = "/bin/su - #{guser} -c \"cd #{rdir} && /usr/bin/git checkout origin/master\""
-                do_gitcommand(commandline,rmode,rdir,client,report_topic,sdebug)
-              end
-
-              if rmode == "trusting"
-                wdir = repo["target"]
-
-                commandline = "/bin/su - #{guser} -c \"cd #{rdir} && /usr/bin/git --work-tree=#{wdir} checkout -f origin/master\""
-                do_gitcommand(commandline,rmode,rdir,client,report_topic,sdebug)
-              end
+          case repo_mode
+          when "branch"
+            if msg.branch == repos[msg.repo]['branch']
+              status = git_branch(repo_dir,repo_user,repos[msg.repo]['target'],repos[msg.repo]['branch']) # origin/$branch
+              logmessage(status,client,report_topic,sdebug)
             else
-              eventdetail = "Repo in config but not in filesystem: #{mval}"
-              logmessage(eventdetail,client,report_topic,sdebug)
+              logmessage("Not our branch: #{branch}",client,report_topic,sdebug) if sdebug
             end
+          when "trusting"
+            status = git_branch(repo_dir,repo_user,repos[msg.repo]['target'],'master') # origin/master
+            logmessage(status,client,report_topic,sdebug)
+          when "puppetmaster"
+            status = git_puppetmaster(repo_dir,repo_user,msg.branch,repos[msg.repo]['target'],"/")
+            logmessage(status,client,report_topic,sdebug)
+          when "atomic"
+            status = git_puppetmaster(repo_dir,repo_user,msg.branch,repos[msg.repo]['target'],"_")
+            logmessage(status,client,report_topic,sdebug)
+          when "normal"
+            # Do nothing.
+          else
+            logmessage("Not a valid repo mode: #{repo_mode}",client,report_topic,sdebug)
           end
+        rescue ArgumentError => e
+          logmessage("User #{user} doesn't exist.",client,report_topic,sdebug)
+        rescue UserLoginException => e
+          logmessage(e.message,client,report_topic,sdebug)
+        rescue MissingRepoException => e
+          logmessage(e.message,client,report_topic,sdebug)
+        rescue NotOurRepoException => e
+          logmessage(e.message,client,report_topic,sdebug) if sdebug
         end
       end
     end
-
     client.join
     client.close
+  else
+    $log.error("Cannot subscribe to #{listen_topic}. Baling.")
   end
 
 else
