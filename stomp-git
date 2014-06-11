@@ -110,10 +110,10 @@ def git_branch(rdir,user,target,branch)
   return status_message
 end
 
-def git_puppetmaster(rdir,user,branch,target,separator)
-  pdir = target.to_s + separator + branch
+def git_puppetmaster(rdir,user,smsg,target,separator)
+  pdir = target.to_s + separator + smsg.branch
 
-  if branch =~ /0000000000000000000000000000000000000000/
+  if smsg.commit_id =~ /0000000000000000000000000000000000000000/
     # forcefully remove the branch
     commandline = "/bin/su - #{user} -c \"/bin/rm -fr #{pdir}\""
     status,stdout,stderr = systemu(commandline, :chomp => true)
@@ -128,12 +128,12 @@ def git_puppetmaster(rdir,user,branch,target,separator)
       FileUtils.mkdir_p(pdir)
       File.chown(guserinfo.uid,guserinfo.gid,pdir)
     end
-    commandline = "/bin/su - #{user} -c \"cd #{rdir} && /usr/bin/git --work-tree=#{pdir} checkout -f origin/#{branch}\""
+    commandline = "/bin/su - #{user} -c \"cd #{rdir} && /usr/bin/git --work-tree=#{pdir} checkout -f origin/#{smsg.branch}\""
     status,stdout,stderr = systemu(commandline, :cwd => rdir, :chomp => true)
     if status != 0
       status_message = "problem: " + stderr
     else
-      status_message = "checked out #{branch} to #{target} as #{pdir}."
+      status_message = "checked out #{smsg.branch} to #{target} as #{pdir}."
     end
   end
 
@@ -258,10 +258,10 @@ if pid.nil?
             status = git_branch(repo_dir,repo_user,repos[msg.repo]['target'],'master') # origin/master
             logmessage(status,client,report_topic,sdebug)
           when "puppetmaster"
-            status = git_puppetmaster(repo_dir,repo_user,msg.branch,repos[msg.repo]['target'],"/")
+            status = git_puppetmaster(repo_dir,repo_user,msg,repos[msg.repo]['target'],"/")
             logmessage(status,client,report_topic,sdebug)
           when "atomic"
-            status = git_puppetmaster(repo_dir,repo_user,msg.branch,repos[msg.repo]['target'],"_")
+            status = git_puppetmaster(repo_dir,repo_user,msg,repos[msg.repo]['target'],"_")
             logmessage(status,client,report_topic,sdebug)
           when "normal"
             # Do nothing.
