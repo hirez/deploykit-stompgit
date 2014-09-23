@@ -94,7 +94,7 @@ def gitfetch(mess,rdir,user)
   return status_message
 end
 
-def git_branch(rdir,user,target,branch)
+def git_branch(rdir,user,target,branch,repo)
   if !File.exists?(target)
     guserinfo = Etc.getpwnam(user)
     FileUtils.mkdir_p(target)
@@ -105,7 +105,7 @@ def git_branch(rdir,user,target,branch)
   if status != 0
     status_message = "problem: " + stderr
   else
-    status_message = "checked out #{branch} to #{target}."
+    status_message = "checked out: [#{repo}] #{branch} to #{target}"
   end
   return status_message
 end
@@ -249,13 +249,13 @@ if pid.nil?
           case repo_mode
           when "branch"
             if msg.branch == repos[msg.repo]['branch']
-              status = git_branch(repo_dir,repo_user,repos[msg.repo]['target'],repos[msg.repo]['branch']) # origin/$branch
+              status = git_branch(repo_dir,repo_user,repos[msg.repo]['target'],repos[msg.repo]['branch'],msg.repo) # origin/$branch
               logmessage(status,client,report_topic,sdebug)
             else
               logmessage("Not our branch: #{branch}",client,report_topic,sdebug) if sdebug
             end
           when "trusting"
-            status = git_branch(repo_dir,repo_user,repos[msg.repo]['target'],'master') # origin/master
+            status = git_branch(repo_dir,repo_user,repos[msg.repo]['target'],'master',msg.repo) # origin/master
             logmessage(status,client,report_topic,sdebug)
           when "puppetmaster"
             status = git_puppetmaster(repo_dir,repo_user,msg,repos[msg.repo]['target'],"/")

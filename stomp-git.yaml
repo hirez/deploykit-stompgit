@@ -23,7 +23,6 @@ report-topic: future.events.stomp-git
 # Modes badly explained:
 # normal: - fetch $repo.
 # trusting - fetch $repo, checkout origin/master to $target.
-# dangerous - fetch $repo, checkout origin/master.
 # branch - fetch $repo, checkout $branch to $target.
 # atomic - fetch $repo, checkout $branch to $target_$branch.
 # puppetmaster - fetch $repo, checkout to $target/$branch.
@@ -45,8 +44,9 @@ repo-list:
 #
 #  puppet-hieradata:
 #    user: puppet
-#    repo: /etc/puppet/hieradata
-#    mode: dangerous
+#    repo: /etc/puppet/puppet-hieradata
+#    target: /etc/puppet/hieradata
+#    mode: trusting
 #
 #  puppet-environments:
 #    user: puppet
