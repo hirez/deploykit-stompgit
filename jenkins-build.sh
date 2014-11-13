@@ -13,7 +13,7 @@ BUILDN=${BUILD_NUMBER:=1}
 
 /usr/bin/fakeroot /usr/local/bin/fpm -s dir -t deb -n "stomp-git" -f \
   -v ${PKG_VER}.${BUILDN} --description "Future remote repo tracker" \
-  --config-file build/stomp-git/stomp-git.yaml \
+  --config-files build/stomp-git/stomp-git.yaml \
   -a all -m "<list.itoperations@futurenet.com>" \
   -C ./build .
 
