@@ -2,18 +2,25 @@
 # Stomp connection options.
 #
 stompconnector:
+  :connect_headers:
+    :accept-version: '1.1'
+    :host: stompgit
+    :heart-beat: '30500,29500'
   :reliable: true
   :hosts:
-  - :login: broker-user
-    :passcode: broker-password
-    :host: broker01
+  - :login: stomp-user
+    :passcode: stomp-pass
+    :host: broker-1
     :port: 61613
     :ssl: false
-  - :login: broker-user
-    :passcode: broker-password
-    :host: broker02
+  - :login: stomp-user
+    :passcode: stomp-pass
+    :host: broker-2
     :port: 61613
     :ssl: false
+
+# Gubbins
+log-file: /var/log/stomp-git.log
 
 #
 # Topics:

@@ -19,6 +19,79 @@ class UserLoginException<Exception;end;
 class MissingRepoException<Exception;end;
 class NotOurRepoException<Exception;end;
 
+class EventLogger
+  def on_publish(params, message, headers)
+    $log.debug("Published #{headers} to #{stomp_url(params)}")
+  rescue
+  end
+
+  def on_connecting(params=nil)
+    $log.info("TCP Connection attempt %d to %s" % [params[:cur_conattempts], stomp_url(params)])
+  rescue
+  end
+
+  def on_connected(params=nil)
+    $log.info("Connected to #{stomp_url(params)}")
+  rescue
+  end
+
+  def on_disconnect(params=nil)
+    $log.info("Disconnected from #{stomp_url(params)}")
+  rescue
+  end
+
+  def on_connectfail(params=nil)
+    $log.info("TCP Connection to #{stomp_url(params)} failed on attempt #{params[:cur_conattempts]}")
+  rescue
+  end
+
+  def on_miscerr(params, errstr)
+    $log.error("Unexpected error on connection #{stomp_url(params)}: #{errstr}")
+  rescue
+  end
+
+  def on_ssl_connecting(params)
+    $log.info("Estblishing SSL session with #{stomp_url(params)}")
+  rescue
+  end
+
+  def on_ssl_connected(params)
+    $log.info("SSL session established with #{stomp_url(params)}")
+  rescue
+  end
+
+  def on_ssl_connectfail(params)
+    $log.error("SSL session creation with #{stomp_url(params)} failed: #{params[:ssl_exception]}")
+  end
+
+  # Stomp 1.1+ - heart beat read (receive) failed.
+  def on_hbread_fail(params, ticker_data)
+    $log.error("Heartbeat read failed from '%s': %s" % [stomp_url(params), ticker_data.inspect])
+  rescue Exception => e
+  end
+
+  # Stomp 1.1+ - heart beat send (transmit) failed.
+  def on_hbwrite_fail(params, ticker_data)
+    $log.error("Heartbeat write failed from '%s': %s" % [stomp_url(params), ticker_data.inspect])
+  rescue Exception => e
+  end
+
+  # Log heart beat fires
+  def on_hbfire(params, srind, curt)
+    case srind
+      when "receive_fire"
+        $log.debug("Received heartbeat from %s: %s, %s" % [stomp_url(params), srind, curt])
+      when "send_fire"
+        $log.debug("Publishing heartbeat to %s: %s, %s" % [stomp_url(params), srind, curt])
+    end
+  rescue Exception => e
+  end
+
+  def stomp_url(params)
+    "%s://%s@%s:%d" % [ params[:cur_ssl] ? "stomp+ssl" : "stomp", params[:cur_login], params[:cur_host], params[:cur_port]]
+  end
+end
+
 # stdout and stderr require an io handle to write to... this makes Logger one :)
 class Logwrite
   def initialize(logger, type)
@@ -185,7 +258,12 @@ end
 
 optparse.parse!
 
-$log = Logger.new("/var/log/stomp-git.log")
+yconfig = YAML.load_file(options[:configfile])
+sdebug = options[:debug]
+
+puts YAML.dump(yconfig) if sdebug
+
+$log = Logger.new(yconfig['log-file'])
 $log.level = Logger::INFO
 
 if !options[:debug]
@@ -210,16 +288,12 @@ if pid.nil?
     $log.info("Re-read #{options[:configfile]}")
   end
 
-  yconfig = YAML.load_file(options[:configfile])
-  sdebug = options[:debug]
-
-  puts YAML.dump(yconfig) if sdebug
+  listen_topic = yconfig['listen-topic']
+  report_topic = yconfig['report-topic']
+  repos = yconfig['repo-list']
 
   stompconnector = yconfig['stompconnector']
-  listen_topic = yconfig["listen-topic"]
-  report_topic = yconfig["report-topic"]
-
-  repos = yconfig["repo-list"]
+  stompconnector[:logger] = EventLogger.new
 
   client = Stomp::Client.new(stompconnector)
 
