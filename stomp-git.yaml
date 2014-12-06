@@ -61,3 +61,9 @@ repo-list:
 #    target: /etc/puppet/environments
 #    mode: puppetmaster
 #
+#  my-tagged-project:
+#    user: puppet
+#    repo: /data/repo/my-tagged-project
+#    target: /data/my-tagged-project
+#    mode: tags
+#

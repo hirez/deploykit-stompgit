@@ -370,6 +370,9 @@ if pid.nil?
           when "puppetmaster"
             status = git_puppetmaster(repo_dir,repo_user,msg,repos[msg.repo]['target'],"/")
             logmessage(status,client,report_topic,sdebug)
+          when "tags"
+            status = git_tags(repo_dir,repo_user,msg,repos[msg.repo]['target'],"/")
+            logmessage(status,client,report_topic,sdebug)
           when "atomic"
             status = git_puppetmaster(repo_dir,repo_user,msg,repos[msg.repo]['target'],"_")
             logmessage(status,client,report_topic,sdebug)
