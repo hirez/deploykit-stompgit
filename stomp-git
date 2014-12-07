@@ -12,7 +12,7 @@ require 'etc'
 
 
 options = {}
-version = "3.15"
+version = "3.16"
 pidfile = '/var/run/stomp-git.pid'
 
 class UserLoginException<Exception;end;
