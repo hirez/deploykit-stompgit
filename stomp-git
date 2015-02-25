@@ -10,7 +10,9 @@ require 'socket'
 require 'fileutils'
 require 'etc'
 
-require_relative 'lib/stomp-git'
+require 'stomp-lib'
+#require_relative 'lib/stomp-lib'
+
 
 options = {}
 version = "3.17"
