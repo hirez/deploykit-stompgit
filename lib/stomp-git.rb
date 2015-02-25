@@ -224,6 +224,36 @@ def git_puppetmaster(rdir,user,smsg,target,separator)
   return status_message
 end
 
+def git_tags(rdir,user,smsg,target,separator)
+  pdir = target.to_s + separator + smsg.tag
+
+  if smsg.commit_id =~ /0000000000000000000000000000000000000000/
+    # forcefully remove the branch
+    commandline = "/bin/su - #{user} -c \"/bin/rm -fr #{pdir}\""
+    status,stdout,stderr = systemu(commandline, :chomp => true)
+    if status != 0
+      status_message = "problem removing tag: " + stderr
+    else
+      status_message = "removed tag #{pdir} "
+    end
+  else
+    if !File.exists?(pdir)
+      guserinfo = Etc.getpwnam(user)
+      FileUtils.mkdir_p(pdir)
+      File.chown(guserinfo.uid,guserinfo.gid,pdir)
+    end
+    commandline = "/bin/su - #{user} -c \"cd #{rdir} && /usr/bin/git --work-tree=#{pdir} checkout -f origin/#{smsg.tag}\""
+    status,stdout,stderr = systemu(commandline, :cwd => rdir, :chomp => true)
+    if status != 0
+      status_message = "problem: " + stderr
+    else
+      status_message = "checked out #{smsg.tag} to #{target} as #{pdir}."
+    end
+  end
+
+  return status_message
+end
+
 def logmessage(message,sclient,topic,debug)
 
   $log.info(message)

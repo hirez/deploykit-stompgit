@@ -13,7 +13,7 @@ require 'etc'
 require_relative 'lib/stomp-git'
 
 options = {}
-version = "3.16"
+version = "3.17"
 pidfile = '/var/run/stomp-git.pid'
 
 optparse = OptionParser.new do|opts|
@@ -112,6 +112,9 @@ if pid.nil?
             logmessage(status,client,report_topic,sdebug)
           when "puppetmaster"
             status = git_puppetmaster(repo_dir,repo_user,msg,repos[msg.repo]['target'],"/")
+            logmessage(status,client,report_topic,sdebug)
+          when "tags"
+            status = git_tags(repo_dir,repo_user,msg,repos[msg.repo]['target'],"/")
             logmessage(status,client,report_topic,sdebug)
           when "atomic"
             status = git_puppetmaster(repo_dir,repo_user,msg,repos[msg.repo]['target'],"_")
