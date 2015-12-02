@@ -21,6 +21,9 @@ stompconnector:
 
 # Gubbins
 log-file: /var/log/stomp-git.log
+# If you have a fluent endpoint, you can set this as activity destination
+# instead of 'report-topic' below. Or as well as. Or neither.
+#fluent-name: stomp-git
 
 #
 # Topics:
