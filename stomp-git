@@ -2,38 +2,33 @@
 
 require 'rubygems'
 require 'yaml'
-require 'systemu'
-require 'stomp'
-require 'logger'
 require 'optparse'
-require 'socket'
-require 'fileutils'
-require 'etc'
+require 'logger'
 
-require 'stomp-lib'
-#require_relative 'lib/stomp-lib'
-
+# You probably don't have the future-stomp gem..
+require 'future-stomp'
+#require_relative 'lib/future-stomp'
 
 options = {}
-version = "3.17"
+version = '3.20'
 pidfile = '/var/run/stomp-git.pid'
 
 optparse = OptionParser.new do|opts|
-  opts.banner = "Usage: stomp-git.rb [options]"
+  opts.banner = 'Usage: stomp-git.rb [options]'
 
   options[:debug] = false
-  opts.on( '-d', '--debug', 'Much output, do not detach' ) do
+  opts.on('-d', '--debug', 'Much output, do not detach') do
     options[:debug] = true
   end
 
-  options[:configfile] = "/etc/stomp-git/stomp-git.yaml"
-  opts.on( '-c', '--config FILE', 'Config is FILE' ) do|file|
+  options[:configfile] = '/etc/stomp-git/stomp-git.yaml'
+  opts.on('-c', '--config FILE', 'Config is FILE') do|file|
     options[:configfile] = file
   end
 
-  opts.on( '-h', '--help', 'Display this screen' ) do
+  opts.on('-h', '--help', 'Display this screen') do
     puts opts
-        exit
+    exit
   end
 end
 
@@ -44,110 +39,102 @@ sdebug = options[:debug]
 
 puts YAML.dump(yconfig) if sdebug
 
-$log = Logger.new(yconfig['log-file'])
-$log.level = Logger::INFO
+slog = GLog.new(options[:configfile],sdebug)
 
 if !options[:debug]
-  $stderr = Logwrite.new($log, "stderr")
-  $stdout = Logwrite.new($log, "stdout")
   pid = Process.fork
 else
   pid = nil
-  puts "DEBUG"
+  puts 'DEBUG'
   puts "VERSION #{version}"
   puts "CONFIGFILE: #{options[:configfile]}"
 end
 
 if pid.nil?
-  Signal.trap("TERM") do
-    $log.info("Terminating.")
-      exit
-    end
+  Signal.trap('TERM') do
+    slog.msg('Terminating.')
+    exit
+  end
 
-  Signal.trap("HUP") do
+  Signal.trap('HUP') do
     yconfig = YAML.load_file(options[:configfile])
-    $log.info("Re-read #{options[:configfile]}")
+    slog.msg("Re-read #{options[:configfile]}")
   end
 
   listen_topic = yconfig['listen-topic']
-  report_topic = yconfig['report-topic']
   repos = yconfig['repo-list']
 
   stompconnector = yconfig['stompconnector']
-  stompconnector[:logger] = EventLogger.new
+  stompconnector[:logger] = slog
 
   client = Stomp::Client.new(stompconnector)
 
   if client
-    logmessage("V. #{version} connected to #{listen_topic}",client,report_topic,sdebug)
+    slog.hash('start',{'version' => version, 'topic' => listen_topic})
 
     client.subscribe "/topic/#{listen_topic}" do |message|
-      if message.body == "\n"
-        puts "Bodge-beat frame" if sdebug
-      else
-        dumpmessage(message) if sdebug
+      dumpmessage(message) if sdebug
 
-        msg = Parsemessage.new(message)
-        
-        begin
-          check_valid_repo(msg.repo,repos)
-    
-          repo_dir  = repos[msg.repo]['repo']
-          repo_user = repos[msg.repo]['user']
-          repo_mode = repos[msg.repo]['mode']
+      msg = Parsemessage.new(message)
 
-          check_valid_user(repo_user)
+      begin
+        check_valid_repo(msg.repo,repos)
 
-          status = gitfetch(msg,repo_dir,repo_user)
-          logmessage(status,client,report_topic,sdebug)
+        repo_dir  = repos[msg.repo]['repo']
+        repo_user = repos[msg.repo]['user']
+        repo_mode = repos[msg.repo]['mode']
 
-          case repo_mode
-          when "branch"
-            if msg.branch == repos[msg.repo]['branch']
-              status = git_branch(repo_dir,repo_user,repos[msg.repo]['target'],repos[msg.repo]['branch'],msg.repo) # origin/$branch
-              logmessage(status,client,report_topic,sdebug)
-            else
-              logmessage("Not our branch: #{branch}",client,report_topic,sdebug) if sdebug
-            end
-          when "trusting"
-            status = git_branch(repo_dir,repo_user,repos[msg.repo]['target'],'master',msg.repo) # origin/master
-            logmessage(status,client,report_topic,sdebug)
-          when "puppetmaster"
-            status = git_puppetmaster(repo_dir,repo_user,msg,repos[msg.repo]['target'],"/")
-            logmessage(status,client,report_topic,sdebug)
-          when "tags"
-            status = git_tags(repo_dir,repo_user,msg,repos[msg.repo]['target'],"/")
-            logmessage(status,client,report_topic,sdebug)
-          when "atomic"
-            status = git_puppetmaster(repo_dir,repo_user,msg,repos[msg.repo]['target'],"_")
-            logmessage(status,client,report_topic,sdebug)
-          when "normal"
-            # Do nothing.
+        check_valid_user(repo_user)
+
+        status = gitfetch(msg,repo_dir,repo_user)
+        slog.hash('fetch',status)
+
+        case repo_mode
+        when 'branch'
+          if msg.branch == repos[msg.repo]['branch']
+            status = git_branch(msg,repo_dir,repo_user,repos[msg.repo]['target'],repos[msg.repo]['branch']) # origin/$branch
+            slog.hash('branch',status)
           else
-            logmessage("Not a valid repo mode: #{repo_mode}",client,report_topic,sdebug)
+            slog.hash('error',{'error' => 'Not our branch','branch' => branch}) if sdebug
           end
-        rescue ArgumentError => e
-          logmessage("User #{user} doesn't exist.",client,report_topic,sdebug)
-        rescue UserLoginException => e
-          logmessage(e.message,client,report_topic,sdebug)
-        rescue MissingRepoException => e
-          logmessage(e.message,client,report_topic,sdebug)
-        rescue NotOurRepoException => e
-          logmessage(e.message,client,report_topic,sdebug) if sdebug
+        when 'trusting'
+          status = git_branch(msg,repo_dir,repo_user,repos[msg.repo]['target'],'master') # origin/master
+          slog.hash('trusting',status)
+        when 'puppetmaster'
+          status = git_puppetmaster(repo_dir,repo_user,msg,repos[msg.repo]['target'],'/')
+          slog.hash('puppetmaster',status)
+        when 'tags'
+          status = git_tags(repo_dir,repo_user,msg,repos[msg.repo]['target'],'/')
+          slog.hash('tags',status)
+        when 'atomic'
+          status = git_puppetmaster(repo_dir,repo_user,msg,repos[msg.repo]['target'],'_')
+          slog.hash('atomic',status)
+        when 'normal'
+          # Do nothing.
+        else
+          slog.hash('error',{'error '=> 'Not a valid repo mode','mode' => repo_mode})
         end
+      rescue ArgumentError
+        slog.hash('error',{'error' => 'User doesn\'t exist','user' => repo_user})
+      rescue UserLoginException
+        slog.hash('error',{'error' => 'User has no login shell','user' => repo_user})
+      rescue MissingRepoException
+        slog.hash('error',{'error' => 'Repo in config but not in filesystem','repo' => msg.repo})
+      rescue NotOurRepoException
+        slog.hash('error',{'error' => 'Not our repo','repo' => msg.repo}) if sdebug
       end
     end
     client.join
     client.close
   else
-    $log.error("Cannot subscribe to #{listen_topic}. Baling.")
+    slog.hash('error',{'error' => 'Cannot subscribe to topic','topic' => listen_topic})
   end
 
 else
   begin
     File.open(pidfile, 'w') {|f| f.write(pid) }
   rescue Errno::EACCES
-    $log.error("Cannot create PID file. Check the permissions and try again.")
+    slog.hash('error',{'error' => 'Cannot create PID file. Check the permissions and try again.'})
     pid = nil
     exit
   end
